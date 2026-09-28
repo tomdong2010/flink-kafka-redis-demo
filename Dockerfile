@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # One image for everything: the Flink JobManager/TaskManager run the job jar from usrlib/,
 # and docker/app.sh runs the producer and the dashboard with the same libraries.
-FROM maven:3.9-eclipse-temurin-17 AS build
+FROM maven:3-eclipse-temurin-24 AS build
 WORKDIR /src
 COPY pom.xml .
 RUN --mount=type=cache,target=/root/.m2 mvn -B -q dependency:go-offline
