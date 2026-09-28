@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Real-time Trending · Kafka → Flink → Redis</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f3f0;
+    --surface-1: #fcfcfb;
+    --border: #e2e0da;
+    --grid: #ebe9e4;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #7a7874;
+    --live: #008300;
+    --stale: #c98500;
+    /* Categorical slots 1-6, validated for the light surface. */
+    --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4; --c6: #008300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-0: #111110; --surface-1: #1a1a19; --border: #2e2e2c; --grid: #262624;
+      --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+      --live: #3fb950; --stale: #c98500;
+      --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181; --c6: #008300;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-0: #111110; --surface-1: #1a1a19; --border: #2e2e2c; --grid: #262624;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --live: #3fb950; --stale: #c98500;
+    --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181; --c6: #008300;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface-0); color: var(--text-primary);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; padding: 20px 24px 8px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; }
+  .pipeline { color: var(--text-secondary); font-size: 13px; }
+  .status { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+  .dot.live { background: var(--live); box-shadow: 0 0 0 0 var(--live); animation: pulse 2s infinite; }
+  .dot.stale { background: var(--stale); }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--live) 60%, transparent); }
+                     70% { box-shadow: 0 0 0 8px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  main { display: grid; gap: 16px; padding: 8px 24px 24px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); }
+  .kpis { grid-column: 1 / -1; display: grid; gap: 16px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; }
+  .kpi .label { color: var(--text-secondary); font-size: 12px; }
+  .kpi .value { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kpi .sub { color: var(--text-muted); font-size: 12px; }
+  h2 { font-size: 15px; margin: 0; font-weight: 600; }
+  .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .hint { color: var(--text-muted); font-size: 12px; }
+  /* Leaderboard: rows are absolutely positioned so rank changes animate like a bar race. */
+  .board { position: relative; }
+  .row { position: absolute; left: 0; right: 0; height: 34px; display: grid; align-items: center;
+         grid-template-columns: 22px minmax(0, 11fr) minmax(0, 9fr) 48px; gap: 10px;
+         transition: transform .6s ease, opacity .4s; }
+  .rank { color: var(--text-muted); font-variant-numeric: tabular-nums; text-align: right; font-size: 12px; }
+  .label { min-width: 0; line-height: 1.2; }
+  .label .name { display: block; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .label .cat { display: flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 11px; }
+  .label .cat i { width: 8px; height: 8px; border-radius: 2px; }
+  .bar-wrap { position: relative; height: 14px; min-width: 0; }
+  .bar { position: absolute; left: 0; top: 0; bottom: 0; min-width: 2px; border-radius: 0 4px 4px 0; transition: width .6s ease; }
+  .score { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary); font-size: 13px; }
+  .empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 8px; padding: 0; list-style: none; font-size: 12px; color: var(--text-secondary); }
+  .legend li { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .chart { position: relative; }
+  svg { display: block; width: 100%; overflow: visible; }
+  .axis text { fill: var(--text-muted); font-size: 11px; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .seg { stroke: var(--surface-1); stroke-width: 1; }
+  .col-hover { fill: var(--text-muted); opacity: .12; }
+  .tooltip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
+             border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 6px 20px rgb(0 0 0 / .18);
+             min-width: 230px; white-space: nowrap; display: none; z-index: 2; }
+  .tooltip .t { color: var(--text-secondary); margin-bottom: 4px; }
+  .tooltip .r { display: flex; align-items: center; gap: 6px; }
+  .tooltip .r span:last-child { margin-left: auto; font-variant-numeric: tabular-nums; padding-left: 12px; }
+  details { margin-top: 12px; color: var(--text-secondary); font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--grid); }
+  th:first-child, td:first-child { text-align: left; }
+  footer { padding: 0 24px 24px; color: var(--text-muted); font-size: 12px; }
+  footer a { color: inherit; }
+  @media (max-width: 900px) {
+    header, main, footer { padding-left: 16px; padding-right: 16px; }
+    main { grid-template-columns: minmax(0, 1fr); }
+    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .status { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Real-time trending &amp; GMV</h1>
+  <span class="pipeline">Kafka → Flink 2 (event time, sliding windows) → Redis → this page</span>
+  <span class="status"><span id="dot" class="dot"></span><span id="status">connecting…</span></span>
+</header>
+
+<main>
+  <section class="kpis" aria-label="Key figures">
+    <div class="card kpi"><div class="label">GMV · last minute</div><div class="value" id="kpi-gmv">–</div><div class="sub" id="kpi-gmv-sub">&nbsp;</div></div>
+    <div class="card kpi"><div class="label">Orders · last minute</div><div class="value" id="kpi-orders">–</div><div class="sub" id="kpi-orders-sub">&nbsp;</div></div>
+    <div class="card kpi"><div class="label">Hottest product</div><div class="value" id="kpi-top">–</div><div class="sub" id="kpi-top-sub">&nbsp;</div></div>
+    <div class="card kpi"><div class="label">Result freshness</div><div class="value" id="kpi-lag">–</div><div class="sub">now − end of latest window</div></div>
+  </section>
+
+  <section class="card" aria-labelledby="trending-title">
+    <div class="card-head">
+      <h2 id="trending-title">Trending products</h2>
+      <span class="hint" id="trending-hint">sliding window</span>
+    </div>
+    <div class="board" id="board" role="list"></div>
+  </section>
+
+  <section class="card" aria-labelledby="gmv-title">
+    <div class="card-head">
+      <h2 id="gmv-title">GMV per category</h2>
+      <span class="hint">revenue per 10 s tumbling window, stacked</span>
+    </div>
+    <ul class="legend" id="legend"></ul>
+    <div class="chart" id="chart">
+      <svg id="svg" height="300" role="img" aria-label="Revenue per category over time, stacked columns"></svg>
+      <div class="tooltip" id="tooltip"></div>
+    </div>
+    <details>
+      <summary>Show as table</summary>
+      <div id="table"></div>
+    </details>
+  </section>
+</main>
+
+<footer>
+  Scores: view = 1, add to cart = 3, purchase = 5. Data refreshes every 2 seconds from <code>/api/trending</code> and <code>/api/gmv</code>.
+  · <a href="https://github.com/tomdong2010/flink-kafka-redis-demo">flink-kafka-redis-demo</a>
+</footer>
+
+<script>
+(() => {
+  const ROW_H = 36;
+  const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+  const money2 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+  const num = new Intl.NumberFormat('en-US');
+  const time = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+  const $ = id => document.getElementById(id);
+
+  // Color follows the category, in a fixed order, in both charts.
+  let categories = [];
+  const color = cat => { const i = categories.indexOf(cat); return i < 0 ? 'var(--text-muted)' : `var(--c${i + 1})`; };
+
+  // ---- Leaderboard ---------------------------------------------------------------------
+  const rows = new Map();
+  function renderBoard(data) {
+    const board = $('board');
+    const items = data.items || [];
+    board.style.height = Math.max(items.length, 1) * ROW_H + 'px';
+    if (!items.length) {
+      board.innerHTML = '<div class="empty">Waiting for the first window…</div>';
+      rows.clear();
+      return;
+    }
+    board.querySelector('.empty')?.remove();
+    const max = Math.max(...items.map(i => i.score), 1);
+    const seen = new Set();
+    items.forEach((item, idx) => {
+      seen.add(item.productId);
+      let row = rows.get(item.productId);
+      if (!row) {
+        row = document.createElement('div');
+        row.className = 'row';
+        row.setAttribute('role', 'listitem');
+        row.innerHTML = '<span class="rank"></span><div class="label"><span class="name"></span>' +
+          '<span class="cat"><i></i><span></span></span></div><div class="bar-wrap"><div class="bar"></div></div>' +
+          '<span class="score"></span>';
+        row.style.transform = `translateY(${items.length * ROW_H}px)`;
+        row.style.opacity = '0';
+        board.appendChild(row);
+        rows.set(item.productId, row);
+      }
+      row.querySelector('.rank').textContent = item.rank;
+      row.querySelector('.name').textContent = item.name;
+      row.querySelector('.cat span').textContent = item.category;
+      row.querySelector('.cat i').style.background = color(item.category);
+      row.querySelector('.score').textContent = num.format(item.score);
+      const bar = row.querySelector('.bar');
+      bar.style.background = color(item.category);
+      bar.style.width = (100 * item.score / max).toFixed(1) + '%';
+      row.title = `${item.name} (${item.category}): score ${num.format(item.score)}`;
+      requestAnimationFrame(() => { row.style.transform = `translateY(${idx * ROW_H}px)`; row.style.opacity = '1'; });
+    });
+    for (const [id, row] of rows) {
+      if (!seen.has(id)) { row.remove(); rows.delete(id); }
+    }
+  }
+
+  // ---- GMV line chart --------------------------------------------------------------------
+  let gmvData = null;
+  function renderLegend() {
+    $('legend').innerHTML = categories.map(c =>
+      `<li><span class="swatch" style="background:${color(c)}"></span>${c}</li>`).join('');
+  }
+
+  function niceMax(v) {
+    if (v <= 0) return 100;
+    const p = Math.pow(10, Math.floor(Math.log10(v)));
+    return [1, 2, 2.5, 5, 10].map(m => m * p).find(m => m >= v);
+  }
+
+  // Stacked columns: the height is the window's total GMV, segments show each category.
+  function renderChart() {
+    const svg = $('svg');
+    const windows = gmvData?.windows || [];
+    const W = svg.clientWidth || 600, H = 300, m = { l: 56, r: 8, t: 8, b: 24 };
+    const iw = W - m.l - m.r, ih = H - m.t - m.b;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    if (!windows.length) {
+      svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="var(--text-muted)">Waiting for revenue windows…</text>`;
+      return;
+    }
+    const total = w => categories.reduce((t, c) => t + (w.revenue[c] || 0), 0);
+    const max = niceMax(Math.max(...windows.map(total)));
+    const slot = iw / windows.length, bw = Math.max(2, slot - 2);  // 2px surface gap between columns
+    const x = i => m.l + i * slot + 1;
+    const y = v => m.t + ih - (ih * v) / max;
+    let out = '<g class="axis">';
+    for (let k = 0; k <= 4; k++) {
+      const v = (max * k) / 4, yy = y(v);
+      out += `<line class="gridline" x1="${m.l}" x2="${W - m.r}" y1="${yy}" y2="${yy}"/>`;
+      out += `<text x="${m.l - 8}" y="${yy + 4}" text-anchor="end">${money.format(v)}</text>`;
+    }
+    const every = Math.max(1, Math.ceil(windows.length / Math.max(2, Math.floor(iw / 90))));
+    for (let i = 0; i < windows.length; i += every) {
+      out += `<text x="${x(i) + bw / 2}" y="${H - 6}" text-anchor="middle">${time.format(new Date(windows[i].start))}</text>`;
+    }
+    out += '</g><rect id="col-hover" class="col-hover" y="' + m.t + '" height="' + ih + '" width="' + slot + '" visibility="hidden"/>';
+    windows.forEach((w, i) => {
+      let base = 0;
+      categories.forEach((c, ci) => {
+        const v = w.revenue[c] || 0;
+        if (v <= 0) return;
+        const y0 = y(base), y1 = y(base + v);
+        base += v;
+        const top = categories.slice(ci + 1).every(n => !(w.revenue[n] > 0));
+        const h = Math.max(0, y0 - y1);
+        // Only the top segment gets the rounded data end.
+        out += top
+          ? `<path class="seg" fill="${color(c)}" d="M${x(i)},${y0}V${y1 + Math.min(3, h)}q0,-3 3,-3h${bw - 6}q3,0 3,3V${y0}Z"/>`
+          : `<rect class="seg" fill="${color(c)}" x="${x(i)}" y="${y1}" width="${bw}" height="${h}"/>`;
+      });
+    });
+    out += `<rect id="hit" x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent"/>`;
+    svg.innerHTML = out;
+
+    const hit = $('hit'), hover = $('col-hover'), tip = $('tooltip');
+    hit.addEventListener('mousemove', ev => {
+      const r = svg.getBoundingClientRect();
+      const px = (ev.clientX - r.left) * (W / r.width);
+      const i = Math.max(0, Math.min(windows.length - 1, Math.floor((px - m.l) / slot)));
+      const w = windows[i];
+      hover.setAttribute('x', m.l + i * slot); hover.setAttribute('visibility', 'visible');
+      const lines = categories.map(c => ({ c, v: w.revenue[c] || 0, o: w.orders[c] || 0 })).sort((a, b) => b.v - a.v);
+      tip.innerHTML = `<div class="t">${time.format(new Date(w.start))} · total ${money2.format(total(w))}</div>` + lines.map(l =>
+        `<div class="r"><span class="swatch" style="background:${color(l.c)}"></span><span>${l.c}</span>` +
+        `<span>${money2.format(l.v)} · ${l.o} ${l.o === 1 ? 'order' : 'orders'}</span></div>`).join('');
+      tip.style.display = 'block';
+      const left = ((m.l + (i + 0.5) * slot) / W) * r.width;
+      tip.style.left = (left + tip.offsetWidth + 16 > r.width ? left - tip.offsetWidth - 12 : left + 12) + 'px';
+      tip.style.top = '8px';
+    });
+    hit.addEventListener('mouseleave', () => { tip.style.display = 'none'; hover.setAttribute('visibility', 'hidden'); });
+  }
+
+  function renderTable() {
+    const windows = (gmvData?.windows || []).slice(-10).reverse();
+    $('table').innerHTML = '<table><thead><tr><th>Window start</th>' + categories.map(c => `<th>${c}</th>`).join('') +
+      '</tr></thead><tbody>' + windows.map(w => `<tr><td>${time.format(new Date(w.start))}</td>` +
+      categories.map(c => `<td>${money2.format(w.revenue[c] || 0)}</td>`).join('') + '</tr>').join('') + '</tbody></table>';
+  }
+
+  function renderKpis(trending) {
+    const windows = gmvData?.windows || [];
+    const lastMinute = windows.filter(w => w.start >= (windows.at(-1)?.start ?? 0) - 50_000);
+    const gmv = lastMinute.reduce((s, w) => s + categories.reduce((t, c) => t + (w.revenue[c] || 0), 0), 0);
+    const orders = lastMinute.reduce((s, w) => s + categories.reduce((t, c) => t + (w.orders[c] || 0), 0), 0);
+    $('kpi-gmv').textContent = windows.length ? money.format(gmv) : '–';
+    $('kpi-gmv-sub').textContent = windows.length ? `${lastMinute.length} windows` : ' ';
+    $('kpi-orders').textContent = windows.length ? num.format(orders) : '–';
+    $('kpi-orders-sub').textContent = orders ? `avg ${money2.format(gmv / orders)} per order` : ' ';
+    const top = trending.items?.[0];
+    $('kpi-top').textContent = top ? top.name : '–';
+    $('kpi-top-sub').textContent = top ? `${top.category} · score ${num.format(top.score)}` : ' ';
+    const lag = trending.windowEnd ? Math.max(0, Date.now() - trending.windowEnd) : null;
+    $('kpi-lag').textContent = lag == null ? '–' : `${(lag / 1000).toFixed(1)} s`;
+    $('trending-hint').textContent = trending.windowEnd ? `window ending ${time.format(new Date(trending.windowEnd))}` : 'sliding window';
+    const live = lag != null && lag < 30_000;
+    $('dot').className = 'dot ' + (live ? 'live' : 'stale');
+    $('status').textContent = live ? 'live' : lag == null ? 'waiting for data' : 'stale — is the Flink job running?';
+  }
+
+  async function tick() {
+    try {
+      const [trending, gmv] = await Promise.all([
+        fetch('api/trending').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+        fetch('api/gmv?windows=36').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+      ]);
+      if (!categories.length) { categories = gmv.categories; renderLegend(); }
+      gmvData = gmv;
+      renderBoard(trending);
+      renderChart();
+      renderTable();
+      renderKpis(trending);
+    } catch (e) {
+      $('dot').className = 'dot stale';
+      $('status').textContent = 'cannot reach the API — retrying';
+    }
+  }
+
+  window.addEventListener('resize', () => gmvData && renderChart());
+  tick();
+  setInterval(tick, 2000);
+})();
+</script>
+</body>
+</html>
