@@ -46,8 +46,11 @@ public class UserEvent {
         return 1;
     }
 
-    /** Whether the event carries every field the pipeline relies on. */
-    public boolean isValid() {
+    /**
+     * Whether the event carries every field the pipeline relies on. Deliberately not named
+     * {@code isValid()}, which Jackson would serialize as an extra "valid" property.
+     */
+    public boolean hasRequiredFields() {
         return productId != null && category != null && timestamp > 0
                 && (VIEW.equals(type) || CART.equals(type) || PURCHASE.equals(type));
     }

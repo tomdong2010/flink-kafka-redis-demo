@@ -21,7 +21,7 @@ class EventGeneratorTest {
         Map<String, Integer> types = new HashMap<>();
         for (int i = 0; i < 5_000; i++) {
             UserEvent e = gen.next();
-            assertTrue(e.isValid(), e.toString());
+            assertTrue(e.hasRequiredFields(), e.toString());
             Catalog.Product p = Catalog.byId().get(e.productId);
             assertNotNull(p);
             assertEquals(p.category, e.category);

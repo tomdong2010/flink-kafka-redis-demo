@@ -11,12 +11,14 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.resps.Tuple;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
 import static io.github.tomdong2010.fkr.redis.RedisTestSupport.REDIS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @Testcontainers(disabledWithoutDocker = true)
@@ -91,6 +93,20 @@ class RedisWritersTest {
         assertEquals(List.of("10000"), jedis.zrange(RedisKeys.GMV_WINDOWS, 0, -1));
         long ttl = jedis.ttl(RedisKeys.gmvWindow(10_000));
         assertTrue(ttl > 0 && ttl <= RedisKeys.GMV_TTL_SECONDS);
+    }
+
+    @Test
+    void failedCommandsFailTheFlush() throws Exception {
+        // E.g. a script error or a wrong type: the sink must not report the records as written.
+        jedis.hset(RedisKeys.TRENDING_WINDOW_END, "not", "a string"); // GET in the script fails
+        SimpleCounter counter = new SimpleCounter();
+        RedisSink.Writer<TopProducts> w = new RedisSink.Writer<>(
+                new Jedis(REDIS.getHost(), REDIS.getFirstMappedPort()), new TrendingWriter(), counter);
+        w.write(top(1_000, "a", 1L), null);
+        IOException e = assertThrows(IOException.class, () -> w.flush(false));
+        assertTrue(e.getCause().getMessage().contains("WRONGTYPE"), e.getCause().getMessage());
+        assertEquals(0, counter.getCount());
+        w.close();
     }
 
     @Test

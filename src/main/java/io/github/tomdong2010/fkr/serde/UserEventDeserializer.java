@@ -48,7 +48,7 @@ public class UserEventDeserializer implements KafkaRecordDeserializationSchema<U
         }
         try {
             UserEvent event = Json.MAPPER.readValue(value, UserEvent.class);
-            return event != null && event.isValid() ? event : null;
+            return event != null && event.hasRequiredFields() ? event : null;
         } catch (IOException e) {
             return null;
         }

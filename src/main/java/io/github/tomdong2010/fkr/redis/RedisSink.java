@@ -7,6 +7,8 @@ import org.apache.flink.metrics.Counter;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.Pipeline;
 
+import java.io.IOException;
+
 /**
  * A Flink Sink V2 that writes records to Redis through a pipeline. Buffered commands are sent
  * when the buffer fills up and on every checkpoint, so each checkpoint only completes after its
@@ -46,7 +48,7 @@ public class RedisSink<T> implements Sink<T> {
         }
 
         @Override
-        public void write(T value, Context context) {
+        public void write(T value, Context context) throws IOException {
             if (pipeline == null) {
                 pipeline = jedis.pipelined();
             }
@@ -57,23 +59,31 @@ public class RedisSink<T> implements Sink<T> {
         }
 
         @Override
-        public void flush(boolean endOfInput) {
+        public void flush(boolean endOfInput) throws IOException {
             sync();
         }
 
-        private void sync() {
+        private void sync() throws IOException {
             if (pipeline == null) {
                 return;
             }
-            // Throws if any command failed, which fails the task and restores the last checkpoint.
-            pipeline.syncAndReturnAll();
-            written.inc(buffered);
-            buffered = 0;
+            Pipeline sent = pipeline;
+            int count = buffered;
             pipeline = null;
+            buffered = 0;
+            // A pipeline reports failed commands as exceptions in its result list instead of
+            // throwing, so check them: failing here fails the checkpoint and the task, and Flink
+            // replays from the last checkpoint instead of silently losing the results.
+            for (Object result : sent.syncAndReturnAll()) {
+                if (result instanceof Exception) {
+                    throw new IOException("Redis command failed", (Exception) result);
+                }
+            }
+            written.inc(count);
         }
 
         @Override
-        public void close() {
+        public void close() throws IOException {
             try {
                 sync();
             } finally {

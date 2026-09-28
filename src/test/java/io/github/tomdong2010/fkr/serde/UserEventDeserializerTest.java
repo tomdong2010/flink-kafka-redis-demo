@@ -7,7 +7,9 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -21,6 +23,14 @@ class UserEventDeserializerTest {
     void roundTrip() throws Exception {
         UserEvent e = new UserEvent("id", "u1", "p01", "Electronics", UserEvent.PURCHASE, 89.0, 1_700_000_000_000L);
         assertEquals(e, UserEventDeserializer.parse(Json.MAPPER.writeValueAsBytes(e)));
+    }
+
+    @Test
+    void serializesOnlyTheEventFields() throws Exception {
+        UserEvent e = new UserEvent("id", "u1", "p01", "Electronics", UserEvent.VIEW, 89.0, 5);
+        Set<String> fields = new HashSet<>();
+        Json.MAPPER.readTree(Json.MAPPER.writeValueAsBytes(e)).fieldNames().forEachRemaining(fields::add);
+        assertEquals(Set.of("eventId", "userId", "productId", "category", "type", "price", "timestamp"), fields);
     }
 
     @Test
