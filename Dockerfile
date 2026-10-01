@@ -8,7 +8,7 @@ RUN --mount=type=cache,target=/root/.m2 mvn -B -q dependency:go-offline
 COPY src src
 RUN --mount=type=cache,target=/root/.m2 mvn -B -q package -DskipTests
 
-FROM flink:2.2.1-java17
+FROM flink:2.3.0-java17
 LABEL org.opencontainers.image.source=https://github.com/tomdong2010/flink-kafka-redis-demo
 LABEL org.opencontainers.image.licenses=MIT
 COPY docker/log4j-app.properties /opt/flink/conf/log4j-app.properties
